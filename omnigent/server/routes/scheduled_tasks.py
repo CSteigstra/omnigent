@@ -54,8 +54,8 @@ class CreateScheduledTaskRequest(BaseModel):
     timezone: str = "UTC"
     model_override: str | None = None
     reasoning_effort: str | None = None
-    # Native-harness permission mode (Claude Code), e.g. "acceptEdits". The fire
-    # path derives the runner's --permission-mode launch arg from it.
+    # Native-harness permission mode, e.g. Claude's "acceptEdits" or Codex's
+    # "bypassPermissions". The fire path derives the native launch args.
     permission_mode: str | None = None
     max_cost_usd: float | None = Field(default=None, gt=0)
     # Optional: no PINNED host/workspace. When both are unset the fire path
@@ -242,9 +242,7 @@ def create_scheduled_tasks_router(
             model_override=model_override,
             reasoning_effort=reasoning_effort,
         )
-        # Gate permission_mode on the resolved agent's harness (Claude Code
-        # only), mirroring the web dialog's capability gate. A non-Claude agent
-        # carrying a mode would break the fire (unknown --permission-mode flag).
+        # Gate permission_mode on the resolved harness and its native mapping.
         await validate_permission_mode_agent_support(
             permission_mode=permission_mode,
             agent=agent,
