@@ -1,42 +1,4 @@
-"""End-to-end guard: scheduled codex tasks can opt out of approval stalls.
-
-Bug: a ``codex-native`` scheduled task that needs to write a file stalls
-indefinitely on an interactive ``codex_file_change_approval`` when it fires
-unattended, and there is NO way to opt it out. The scheduled-task REST API
-gates every non-null ``permission_mode`` to ``claude-native`` agents, so a
-``PATCH /v1/scheduled-tasks/<id>`` with ``{"permission_mode":
-"bypassPermissions"}`` — the one knob that would translate to Codex's
-``--dangerously-bypass-approvals-and-sandbox`` launch flag — is rejected with
-a 400.
-
-This test drives the real journey against a live ``omnigent server`` over the
-REST API a scheduling automation uses:
-
-  1. create an hourly ``codex-native-ui`` scheduled task (no mode) -> 200
-  2. PATCH ``permission_mode=bypassPermissions`` -> the unattended opt-in
-     the report asks for. EXPECTED: accepted (200) and persisted.
-     On the buggy build this is rejected with 400
-     ("permission_mode is only supported for claude-native agents"), so this
-     assertion is what fails until the fix lands (the fail->pass target).
-  3. create-time opt-in of ``bypassPermissions`` on a codex task -> 200.
-  4. PATCH ``permission_mode=acceptEdits`` (a Claude-only mode) -> still
-     rejected 400. The expected behavior keeps rejecting Claude-only modes
-     for Codex, so this must hold before AND after the fix.
-  5. control: the identical ``bypassPermissions`` PATCH on a
-     ``claude-native-ui`` task is accepted (200). This isolates the failure
-     to the harness gate (the same run continues normally immediately after
-     the approval is accepted, which isolates the failure to launch policy).
-
-The complementary fire-path half (a codex ``bypassPermissions`` task launching
-with ``--dangerously-bypass-approvals-and-sandbox`` instead of stalling) is a
-unit-level concern covered under ``tests/server/scheduled/test_fire.py``; this
-e2e guard covers the observable REST journey the report reproduces.
-
-The scheduled-task create/update validation runs in-process at persist time
-(it resolves the built-in agent's harness from the agent cache), so this
-journey needs neither an online runner nor a real LLM — it spawns a bare
-state server. The spawn recipe mirrors ``tests/_helpers/live_server.py``.
-"""
+"""Verify scheduled Codex tasks can persist the unattended bypass mode."""
 
 from __future__ import annotations
 
@@ -72,13 +34,7 @@ def _free_port() -> int:
 
 @pytest.fixture()
 def scheduled_tasks_server(tmp_path: Path) -> Iterator[httpx.Client]:
-    """Spawn a bare ``omnigent server`` and yield a loopback HTTP client.
-
-    Mirrors the ``tests/_helpers/live_server.py`` spawn recipe (worktree on
-    ``PYTHONPATH`` via ``apply_server_env`` so the branch's source is what
-    runs, ``server_executable() -m omnigent.cli server``). ``trust_env=False``
-    keeps loopback requests off any ambient ``HTTP(S)_PROXY``.
-    """
+    """Run the scheduling API against a loopback server."""
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     db_path = tmp_path / "e2e.db"
@@ -149,7 +105,6 @@ def scheduled_tasks_server(tmp_path: Path) -> Iterator[httpx.Client]:
 
 
 def _headers() -> dict[str, str]:
-    # A stable owner so the created tasks belong to a resolvable user.
     return {"X-Forwarded-Email": "alice@example.com"}
 
 
@@ -183,15 +138,10 @@ def test_codex_scheduled_task_can_opt_into_bypass_permissions(
     codex_id = _agent_id(client, _CODEX_AGENT_NAME)
     claude_id = _agent_id(client, _CLAUDE_AGENT_NAME)
 
-    # 1. hourly codex task, no mode -> the unattended automation from the report.
     codex_task = _create_task(client, codex_id, "hourly codex artifact")
     codex_task_id = codex_task["id"]
     assert codex_task["permission_mode"] is None
 
-    # 2. PATCH the bypass opt-in the report asks for. On the buggy build this is
-    #    rejected 400 ("permission_mode is only supported for claude-native");
-    #    the fix must accept and persist it (translated later to Codex's
-    #    --dangerously-bypass-approvals-and-sandbox launch flag).
     patched = client.patch(
         f"/v1/scheduled-tasks/{codex_task_id}",
         json={"permission_mode": "bypassPermissions"},
@@ -208,14 +158,11 @@ def test_codex_scheduled_task_can_opt_into_bypass_permissions(
     assert got.status_code == 200
     assert got.json()["permission_mode"] == "bypassPermissions"
 
-    # 3. Create-time opt-in of bypassPermissions on a codex task is also allowed.
     created_with_bypass = _create_task(
         client, codex_id, "hourly codex artifact (bypass)", permission_mode="bypassPermissions"
     )
     assert created_with_bypass["permission_mode"] == "bypassPermissions"
 
-    # 4. A Claude-only mode (acceptEdits) stays rejected for a codex agent —
-    #    the expected behavior keeps this gate. Holds before and after fix.
     rejected = client.patch(
         f"/v1/scheduled-tasks/{codex_task_id}",
         json={"permission_mode": "acceptEdits"},
@@ -224,8 +171,6 @@ def test_codex_scheduled_task_can_opt_into_bypass_permissions(
     assert rejected.status_code == 400, rejected.text
     assert "permission_mode" in rejected.text
 
-    # 5. Control: the identical opt-in on a claude-native task is accepted,
-    #    isolating the failure to the harness launch policy (not the task).
     claude_task = _create_task(client, claude_id, "hourly claude artifact")
     claude_patched = client.patch(
         f"/v1/scheduled-tasks/{claude_task['id']}",

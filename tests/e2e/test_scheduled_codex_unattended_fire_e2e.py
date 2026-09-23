@@ -1,23 +1,4 @@
-"""E2E: a bypass-opted codex-native scheduled task fires unattended.
-
-Guards the launch half of the codex ``bypassPermissions`` opt-in: a scheduled
-task persisted with the mode must fire the real Codex CLI in its bypass stance
-(``--dangerously-bypass-approvals-and-sandbox``), run to completion with no
-browser open, write its artifact, and never park on an approval elicitation.
-The mock model scripts the file write through an ``apply_patch`` command
-targeting a path outside the workspace — exactly the shape that needs an
-approval (or a bypass) under the default stance — so an API-only change that
-accepts the mode but never wires the launch flag fails here.
-
-The REST-journey half (accepting and persisting the opt-in) is covered by
-``test_scheduled_codex_bypass_optin_e2e.py``; route- and fire-derivation
-coverage lives in ``tests/server/integration/test_scheduled_tasks_routes.py``
-and ``tests/server/scheduled/test_fire.py``.
-
-The test spawns its own server + host daemon with a writable
-``OMNIGENT_CONFIG_HOME`` holding a mock openai/responses provider, so the real
-``codex`` CLI (>= 0.139) runs against the mock LLM with no real credentials.
-"""
+"""Verify a scheduled Codex task runs unattended with the real CLI."""
 
 from __future__ import annotations
 
@@ -53,9 +34,7 @@ _UNATTENDED_COMPLETION_TIMEOUT_S = 240.0
 
 def _codex_cli_supports_app_server(codex_path: str) -> bool:
     """Return whether the installed Codex CLI is new enough for the mock lane."""
-    probe = subprocess.run(
-        [codex_path, "--version"], text=True, capture_output=True, check=False
-    )
+    probe = subprocess.run([codex_path, "--version"], text=True, capture_output=True, check=False)
     if probe.returncode != 0:
         return False
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", f"{probe.stdout}\n{probe.stderr}")
@@ -94,15 +73,7 @@ def _wait_health(url: str, procs: list[subprocess.Popen], timeout_s: float) -> s
 def scheduled_codex_stack(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[_ScheduledCodexStack]:
-    """Spawn mock LLM + omnigent server + host daemon routed at the mock.
-
-    The host daemon (not a bare runner) is required: the scheduled-fire path
-    resolves a live host and launches the session's runner through it. The
-    whole stack shares a sandboxed ``HOME``/``CODEX_HOME`` and an
-    ``OMNIGENT_CONFIG_HOME`` whose provider routes native Codex to the mock
-    Responses server, so fired sessions launch the real Codex CLI with no real
-    model credentials.
-    """
+    """Route a server and host daemon through the mock Responses API."""
     tmp = tmp_path_factory.mktemp("codex_sched_stack")
     home = tmp / "home"
     config_home = tmp / "config-home"
@@ -145,7 +116,10 @@ providers:
     }
     env.pop("OMNIGENT_RUNNER_TUNNEL_TOKEN", None)
 
-    logs = {name: open(tmp / f"{name}.log", "w") for name in ("mock", "server", "host")}
+    logs = {
+        name: open(tmp / f"{name}.log", "w")  # noqa: SIM115
+        for name in ("mock", "server", "host")
+    }
     procs: list[subprocess.Popen] = []
     try:
         procs.append(
@@ -247,16 +221,7 @@ def _codex_agent_id(base_url: str) -> str:
 def test_codex_scheduled_fire_with_bypass_completes_unattended(
     scheduled_codex_stack: _ScheduledCodexStack,
 ) -> None:
-    """A bypass-opted codex task fired unattended writes its artifact.
-
-    Journey: create an hourly codex-native task opted into
-    ``bypassPermissions``, trigger a fire (run-now shares the scheduler's fire
-    path), and observe the run with no browser open. The scripted model turn
-    applies a patch outside the workspace — the shape that parks the default
-    stance on an approval — so the run only completes if the fire translated
-    the opt-in into Codex's bypass launch stance. The fired session must never
-    expose a pending approval elicitation, and the artifact must appear.
-    """
+    """A bypass-opted scheduled task writes outside its workspace without approval."""
     codex_path = shutil.which("codex")
     if codex_path is None:
         pytest.skip("codex CLI is required for the scheduled codex fire e2e")
@@ -296,9 +261,7 @@ def test_codex_scheduled_fire_with_bypass_completes_unattended(
         },
         timeout=10,
     ).raise_for_status()
-    # Any unscripted call (e.g. a guardian auto-review consult under a
-    # non-bypass stance) gets an unparseable verdict, so its approval is
-    # denied fail-safe and the artifact can only appear via the bypass stance.
+    # Keep unscripted approval attempts from writing the artifact.
     httpx.post(
         f"{stack.mock_url}/mock/set_fallback",
         json={"key": _CODEX_MOCK_MODEL, "response": {"text": "Done."}},
@@ -330,9 +293,7 @@ def test_codex_scheduled_fire_with_bypass_completes_unattended(
     session_id: str | None = None
     deadline = time.monotonic() + _FIRE_RUN_TIMEOUT_S
     while time.monotonic() < deadline:
-        runs = httpx.get(
-            f"{stack.base_url}/v1/scheduled-tasks/{task_id}/runs", timeout=10
-        ).json()
+        runs = httpx.get(f"{stack.base_url}/v1/scheduled-tasks/{task_id}/runs", timeout=10).json()
         rows = runs.get("runs") or []
         if rows and rows[0].get("conversation_id"):
             session_id = str(rows[0]["conversation_id"])
